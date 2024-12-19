@@ -26,7 +26,6 @@
  * SCK     -> 3.3V
  * 
  * Other:
- // Change this line in your configuration section
  * - PTT Button -> GPIO 32 (with pullup)
  * - Status LED -> GPIO 2
  */
@@ -54,16 +53,11 @@
 #define SAMPLE_RATE         16000    // Sample rate in Hz
 #define SAMPLE_BITS         32       // Sample bits
 #define I2S_CH             I2S_SLOT_MODE_MONO  // Mono mode
-
-// #define DMA_DESC_NUM       3         // Number of DMA descriptors
-// #define DMA_FRAME_NUM      1023      // Maximum frames per DMA buffer
-
 #define DMA_DESC_NUM       4         // Number of DMA descriptors
 #define DMA_FRAME_NUM      960       // Frames per DMA buffer
 
-// Decrease the packet size for more frequent transmissions
-// #define AUDIO_PACKET_SIZE  240       // Leave room for header
-#define AUDIO_PACKET_SIZE  120       // Was 240
+// ESP-NOW packet size
+#define AUDIO_PACKET_SIZE  120       // Audio packet size
 
 // GPIO Pin Configuration - Microphone
 #define I2S_MIC_BCK_IO     26       // Bit clock pin
@@ -91,7 +85,6 @@
 // Device MAC addresses
 const uint8_t MAC_ESP32_1[] = {0xC8, 0x2E, 0x18, 0xC3, 0x95, 0xB0};  // ESP32 #1
 const uint8_t MAC_ESP32_2[] = {0xC8, 0x2E, 0x18, 0xC3, 0x96, 0x38};  // ESP32 #2
-// const uint8_t MAC_ESP32_3[] = {0xC8, 0xF0, 0x9E, 0x50, 0x29, 0xA8};  // ESP32 #3
 
 // VU Meter Configuration
 #define VU_FILTER_ALPHA    0.28      // VU meter time constant (300ms)
@@ -99,8 +92,6 @@ const uint8_t MAC_ESP32_2[] = {0xC8, 0x2E, 0x18, 0xC3, 0x96, 0x38};  // ESP32 #2
 #define VU_SCALE_REF      INT32_MAX  // Full scale reference for dBFS calculation
 
 static const char *TAG = "ESP32_INTERCOM";
-
-
 
 //-----------------------------------------------------------------------------
 // Global Variables
@@ -157,7 +148,6 @@ static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t statu
 static void esp_now_recv_cb(const esp_now_recv_info_t *esp_now_info,
                            const uint8_t *data,
                            int len);
-
 static void print_vu_data(const int32_t* buffer,
                          double dc_offset,
                          double rms,
@@ -398,8 +388,10 @@ static esp_err_t init_espnow(void) {
     // Set up peer MAC (the other device)
     if (memcmp(mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN) == 0) {
         memcpy(peer_mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN);
+        is_device_1 = true;
     } else if (memcmp(mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN) == 0) {
         memcpy(peer_mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN);
+        is_device_1 = false;
     } else {
         ESP_LOGE(TAG, "Unknown device MAC address");
         return ESP_FAIL;
@@ -440,7 +432,7 @@ static void IRAM_ATTR ptt_isr_handler(void* arg) {
     is_transmitting = ptt_pressed;
     gpio_set_level(LED_PIN, ptt_pressed);  // Local LED
 
-    // Schedule PTT status send (can't send ESP-NOW from ISR)
+    // Schedule PTT status send
     static ptt_status_t status;
     status.ptt_active = ptt_pressed;
     esp_now_send(peer_mac, (uint8_t*)&status, sizeof(ptt_status_t));
@@ -464,24 +456,22 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *esp_now_info,
     // Check if it's a PTT status message
     if (len == sizeof(ptt_status_t)) {
         ptt_status_t *status = (ptt_status_t*)data;
-        gpio_set_level(LED_PIN, status->ptt_active);  // Update remote LED
+        gpio_set_level(LED_PIN, status->ptt_active);
         return;
     }
 
     // Handle audio packet
-    if (len == sizeof(audio_packet_t)) {
-        if (!is_transmitting) {  // Only play received audio when not transmitting
-            audio_packet_t *packet = (audio_packet_t*)data;
-            size_t bytes_written = 0;
-            
-            // Write received audio samples to DAC
-            esp_err_t ret = i2s_channel_write(tx_handle, packet->samples,
-                                            packet->size,
-                                            &bytes_written,
-                                            portMAX_DELAY);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to write to DAC: %s", esp_err_to_name(ret));
-            }
+    if (len == sizeof(audio_packet_t) && !is_transmitting) {
+        audio_packet_t *packet = (audio_packet_t*)data;
+        size_t bytes_written = 0;
+        
+        // Write directly to I2S
+        esp_err_t ret = i2s_channel_write(tx_handle, packet->samples,
+                                        packet->size,
+                                        &bytes_written,
+                                        0);  // No wait
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to write to DAC: %s", esp_err_to_name(ret));
         }
     }
 }
@@ -513,8 +503,7 @@ static void print_vu_data(const int32_t* buffer,
     else level_desc = "very quiet";
 
     // Print formatted output with transmission status
-    printf("%s VU: [%s] %.1f dBFS (%s) | DC: %.1f | RMS: %.1f | %s\n",
-           is_device_1 ? "Master" : "Client",
+    printf("VU: [%s] %.1f dBFS (%s) | DC: %.1f | RMS: %.1f | %s\n",
            bar, 
            db_value,
            level_desc,
@@ -575,23 +564,17 @@ static void mic_task(void *arg) {
         if (is_transmitting && peer_connected) {
             // Send audio data in fragments
             for (int offset = 0; offset < samples; offset += AUDIO_PACKET_SIZE / sizeof(int32_t)) {
-
-			    audio_packet_t packet = {
-			        .sequence = sequence++,
-			        .size = MIN(AUDIO_PACKET_SIZE, (int)((samples - offset) * sizeof(int32_t)))
-			    };
-
-                // Copy audio data to packet
+                audio_packet_t packet = {
+                    .sequence = sequence++,
+                    .size = MIN(AUDIO_PACKET_SIZE, (samples - offset) * sizeof(int32_t))
+                };
+                
                 memcpy(packet.samples, &buffer[offset], packet.size);
                 
-                // Send via ESP-NOW
                 esp_err_t ret = esp_now_send(peer_mac, (uint8_t*)&packet, sizeof(packet));
                 if (ret != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to send ESP-NOW packet: %s", esp_err_to_name(ret));
                 }
-                
-                // Small delay to prevent flooding
-                // vTaskDelay(pdMS_TO_TICKS(5));
             }
         }
 
@@ -605,7 +588,7 @@ static void mic_task(void *arg) {
                      vu_state.min_sample,
                      vu_state.max_sample);
         
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(1);  // Minimal delay but still allow other tasks to run
     }
 
     heap_caps_free(buffer);
@@ -644,8 +627,8 @@ void app_main(void) {
     }
     
     // Initialize I2S interfaces
-    ESP_ERROR_CHECK(init_i2s_mic());
-    ESP_ERROR_CHECK(init_i2s_dac());
+    ESP_ERROR_CHECK(init_i2s_mic());  // Microphone
+    ESP_ERROR_CHECK(init_i2s_dac());  // DAC
 
     // Create microphone task
     BaseType_t task_created = xTaskCreate(mic_task,
@@ -665,5 +648,5 @@ void app_main(void) {
         return;
     }
 
-    ESP_LOGI(TAG, "Intercom initialized as %s", is_device_1 ? "Master" : "Client");
+    ESP_LOGI(TAG, "Intercom initialized successfully");
 }
