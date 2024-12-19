@@ -1,33 +1,8 @@
 /*
  * ESP32 Two-Way Intercom System
- * 
- * Features:
- * - INMP441 I2S MEMS Microphone input
- * - PCM5102A I2S DAC output
- * - ESP-NOW wireless communication
- * - Push-to-talk functionality
- * - VU meter for audio monitoring
- * 
- * Hardware Connections:
- * INMP441 Microphone:
- * - VDD -> 3.3V
- * - GND -> GND
- * - SD  -> GPIO 22 (DATA)
- * - WS  -> GPIO 25 (LRCLK)
- * - SCK -> GPIO 26 (BCLK)
- * - L/R -> GND
- * 
- * PCM5102A   ESP32
- * VIN     -> 3.3V
- * GND     -> GND
- * LCK     -> GPIO 14 (I2S_DAC_WS_IO)
- * DIN     -> GPIO 12 (I2S_DAC_DO_IO)
- * BCK     -> GPIO 27 (I2S_DAC_BCK_IO)
- * SCK     -> 3.3V
- * 
- * Other:
- * - PTT Button -> GPIO 32 (with pullup)
- * - Status LED -> GPIO 2
+ * With configurable debug output
+ *
+ * NOTE: Debug controls are located in intercom/main/include/debu_config.h
  */
 
 #include <stdio.h>
@@ -44,12 +19,13 @@
 #include "esp_check.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
+#include "debug_config.h"
 
 //-----------------------------------------------------------------------------
 // Configuration Constants
 //-----------------------------------------------------------------------------
 
-// I2S Microphone Configuration
+// I2S Configuration
 #define SAMPLE_RATE         16000    // Sample rate in Hz
 #define SAMPLE_BITS         32       // Sample bits
 #define I2S_CH             I2S_SLOT_MODE_MONO  // Mono mode
@@ -72,26 +48,27 @@
 #define I2S_DAC_DI_IO      -1       // Data in (not used)
 
 // GPIO Pin Configuration - Controls
-#define PTT_PIN            32       // Push-to-talk button pin (on left side)
+#define PTT_PIN            32       // Push-to-talk button pin
 #define LED_PIN            2         // Status LED pin
 
-// ESP-NOW Configuration
+// WiFi Configuration
 #define WIFI_CHANNEL       1
-#define MAX_PACKET_SIZE    250       // ESP-NOW maximum packet size
+#define MAX_PACKET_SIZE    250
 
-// Macro definition
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 // Device MAC addresses
-const uint8_t MAC_ESP32_1[] = {0xC8, 0x2E, 0x18, 0xC3, 0x95, 0xB0};  // ESP32 #1
-const uint8_t MAC_ESP32_2[] = {0xC8, 0x2E, 0x18, 0xC3, 0x96, 0x38};  // ESP32 #2
+const uint8_t MAC_ESP32_1[] = {0xC8, 0x2E, 0x18, 0xC3, 0x95, 0xB0};
+const uint8_t MAC_ESP32_2[] = {0xC8, 0x2E, 0x18, 0xC3, 0x96, 0x38};
 
 // VU Meter Configuration
-#define VU_FILTER_ALPHA    0.28      // VU meter time constant (300ms)
+#define VU_FILTER_ALPHA    0.28      // VU meter time constant
 #define VU_MIN_DB         -90.0      // Minimum dB value to display
-#define VU_SCALE_REF      INT32_MAX  // Full scale reference for dBFS calculation
+#define VU_SCALE_REF      INT32_MAX  // Full scale reference for dBFS
 
+#if DEBUG_ENABLE
 static const char *TAG = "ESP32_INTERCOM";
+#endif
 
 //-----------------------------------------------------------------------------
 // Global Variables
@@ -112,7 +89,6 @@ typedef struct {
     bool ptt_active;  // true when transmitting
 } ptt_status_t;
 
-// VU Meter State Structure
 typedef struct {
     double filtered_rms;     // Filtered RMS value with VU ballistics
     double dc_offset;        // Current DC offset estimation
@@ -122,7 +98,6 @@ typedef struct {
     bool initialized;        // Initialization state flag
 } vu_meter_state_t;
 
-// Audio packet structure for ESP-NOW transmission
 typedef struct {
     uint16_t sequence;       // Packet sequence number
     uint16_t size;          // Actual data size
@@ -143,7 +118,7 @@ static void vu_meter_process(vu_meter_state_t *state,
 static esp_err_t init_i2s_mic(void);
 static esp_err_t init_i2s_dac(void);
 static esp_err_t init_espnow(void);
-static void ptt_isr_handler(void* arg); 
+static void IRAM_ATTR ptt_isr_handler(void* arg);
 static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status);
 static void esp_now_recv_cb(const esp_now_recv_info_t *esp_now_info,
                            const uint8_t *data,
@@ -162,9 +137,6 @@ static void mic_task(void *arg);
 // Function Implementations
 //-----------------------------------------------------------------------------
 
-/*
- * Initialize VU meter state
- */
 static void vu_meter_init(vu_meter_state_t *state) {
     state->filtered_rms = 0.0;
     state->dc_offset = 0.0;
@@ -174,9 +146,6 @@ static void vu_meter_init(vu_meter_state_t *state) {
     state->initialized = false;
 }
 
-/*
- * Process audio samples and update VU meter state
- */
 static void vu_meter_process(vu_meter_state_t *state, 
                            const int32_t *samples, 
                            size_t sample_count,
@@ -238,9 +207,44 @@ static void vu_meter_process(vu_meter_state_t *state,
     *level_out = level;
 }
 
-/*
- * Initialize I2S interface for INMP441 microphone
- */
+static void print_vu_data(const int32_t* buffer,
+                         double dc_offset,
+                         double rms,
+                         double filtered_rms,
+                         double db_value,
+                         int level,
+                         int32_t min_sample,
+                         int32_t max_sample) {
+    if (!DEBUG_VU_METER) return;  // Skip if VU meter debug is disabled
+    
+    #if DEBUG_VU_METER
+    char bar[21];
+    const char* level_desc;
+    
+    // Create visual VU meter bar
+    for (int i = 0; i < 20; i++) {
+        bar[i] = (i < level * 20 / 100) ? '#' : ' ';
+    }
+    bar[20] = '\0';
+
+    // Determine level description based on dBFS ranges
+    if (db_value > -10) level_desc = "very loud";
+    else if (db_value > -20) level_desc = "loud";
+    else if (db_value > -40) level_desc = "conversation";
+    else if (db_value > -60) level_desc = "quiet";
+    else level_desc = "very quiet";
+
+    // Print formatted output with transmission status
+    DEBUG_VU_PRINT("VU: [%s] %.1f dBFS (%s) | DC: %.1f | RMS: %.1f | %s\n",
+                   bar, 
+                   db_value,
+                   level_desc,
+                   dc_offset,
+                   filtered_rms,
+                   is_transmitting ? "TRANSMITTING" : "LISTENING");
+    #endif
+}
+
 static esp_err_t init_i2s_mic(void) {
     esp_err_t ret = ESP_OK;
     
@@ -253,7 +257,10 @@ static esp_err_t init_i2s_mic(void) {
     };
     
     ret = i2s_new_channel(&chan_cfg, NULL, &rx_handle);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        DEBUG_ERROR_PRINT(TAG, "Failed to create I2S RX channel");
+        return ret;
+    }
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
@@ -286,6 +293,7 @@ static esp_err_t init_i2s_mic(void) {
 
     ret = i2s_channel_init_std_mode(rx_handle, &std_cfg);
     if (ret != ESP_OK) {
+        DEBUG_ERROR_PRINT(TAG, "Failed to initialize I2S RX channel");
         i2s_del_channel(rx_handle);
         return ret;
     }
@@ -293,9 +301,6 @@ static esp_err_t init_i2s_mic(void) {
     return i2s_channel_enable(rx_handle);
 }
 
-/*
- * Initialize I2S interface for PCM5102A DAC
- */
 static esp_err_t init_i2s_dac(void) {
     esp_err_t ret = ESP_OK;
     
@@ -308,7 +313,10 @@ static esp_err_t init_i2s_dac(void) {
     };
     
     ret = i2s_new_channel(&chan_cfg, &tx_handle, NULL);
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK) {
+        DEBUG_ERROR_PRINT(TAG, "Failed to create I2S TX channel");
+        return ret;
+    }
 
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
@@ -341,6 +349,7 @@ static esp_err_t init_i2s_dac(void) {
 
     ret = i2s_channel_init_std_mode(tx_handle, &std_cfg);
     if (ret != ESP_OK) {
+        DEBUG_ERROR_PRINT(TAG, "Failed to initialize I2S TX channel");
         i2s_del_channel(tx_handle);
         return ret;
     }
@@ -348,305 +357,240 @@ static esp_err_t init_i2s_dac(void) {
     return i2s_channel_enable(tx_handle);
 }
 
-/*
- * Initialize ESP-NOW communication
- */
 static esp_err_t init_espnow(void) {
-    esp_err_t ret;
+   esp_err_t ret;
 
-    // Initialize NVS
-    ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+   // Initialize NVS
+   ret = nvs_flash_init();
+   if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+       ESP_ERROR_CHECK(nvs_flash_erase());
+       ret = nvs_flash_init();
+   }
+   ESP_ERROR_CHECK(ret);
 
-    // Create and initialize the event loop
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+   // Create and initialize the event loop
+   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Initialize WiFi in Station mode
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK) return ret;
+   // Initialize WiFi in Station mode
+   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+   ret = esp_wifi_init(&cfg);
+   if (ret != ESP_OK) return ret;
 
-    ret = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (ret != ESP_OK) return ret;
+   ret = esp_wifi_set_mode(WIFI_MODE_STA);
+   if (ret != ESP_OK) return ret;
 
-    ret = esp_wifi_start();
-    if (ret != ESP_OK) return ret;
+   ret = esp_wifi_start();
+   if (ret != ESP_OK) return ret;
 
-    // Get and display local MAC
-    uint8_t mac[6];
-    ret = esp_wifi_get_mac(WIFI_IF_STA, mac);
-    if (ret != ESP_OK) return ret;
+   uint8_t mac[6];
+   ret = esp_wifi_get_mac(WIFI_IF_STA, mac);
+   if (ret != ESP_OK) return ret;
 
-    ESP_LOGI(TAG, "----------------------------------------");
-    ESP_LOGI(TAG, "Local MAC:  %02X:%02X:%02X:%02X:%02X:%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    
-    // Set up peer MAC (the other device)
-    if (memcmp(mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN) == 0) {
-        memcpy(peer_mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN);
-        is_device_1 = true;
-    } else if (memcmp(mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN) == 0) {
-        memcpy(peer_mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN);
-        is_device_1 = false;
-    } else {
-        ESP_LOGE(TAG, "Unknown device MAC address");
-        return ESP_FAIL;
-    }
-    
-    ESP_LOGI(TAG, "Remote MAC: %02X:%02X:%02X:%02X:%02X:%02X",
-             peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5]);
-    ESP_LOGI(TAG, "----------------------------------------");
+   DEBUG_INFO_PRINT(TAG, "----------------------------------------");
+   DEBUG_INFO_PRINT(TAG, "Local MAC:  %02X:%02X:%02X:%02X:%02X:%02X",
+            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+   
+   if (memcmp(mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN) == 0) {
+       memcpy(peer_mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN);
+       is_device_1 = true;
+   } else if (memcmp(mac, MAC_ESP32_2, ESP_NOW_ETH_ALEN) == 0) {
+       memcpy(peer_mac, MAC_ESP32_1, ESP_NOW_ETH_ALEN);
+       is_device_1 = false;
+   } else {
+       DEBUG_ERROR_PRINT(TAG, "Unknown device MAC address");
+       return ESP_FAIL;
+   }
+   
+   DEBUG_INFO_PRINT(TAG, "Remote MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+            peer_mac[0], peer_mac[1], peer_mac[2], peer_mac[3], peer_mac[4], peer_mac[5]);
+   DEBUG_INFO_PRINT(TAG, "----------------------------------------");
 
-    // Initialize ESP-NOW
-    ret = esp_now_init();
-    if (ret != ESP_OK) return ret;
+   ret = esp_now_init();
+   if (ret != ESP_OK) return ret;
 
-    // Register callbacks
-    esp_now_register_send_cb(esp_now_send_cb);
-    esp_now_register_recv_cb(esp_now_recv_cb);
+   esp_now_register_send_cb(esp_now_send_cb);
+   esp_now_register_recv_cb(esp_now_recv_cb);
 
-    // Add peer
-    esp_now_peer_info_t peer_info = {
-        .channel = WIFI_CHANNEL,
-        .encrypt = false,
-    };
-    memcpy(peer_info.peer_addr, peer_mac, ESP_NOW_ETH_ALEN);
-    ret = esp_now_add_peer(&peer_info);
+   esp_now_peer_info_t peer_info = {
+       .channel = WIFI_CHANNEL,
+       .encrypt = false,
+   };
+   memcpy(peer_info.peer_addr, peer_mac, ESP_NOW_ETH_ALEN);
+   ret = esp_now_add_peer(&peer_info);
 
-    if (ret == ESP_OK) {
-        peer_connected = true;
-    }
+   if (ret == ESP_OK) {
+       peer_connected = true;
+   }
 
-    return ret;
+   return ret;
 }
 
-/*
- * PTT button interrupt handler
- */
-static void IRAM_ATTR ptt_isr_handler(void* arg) {
-    bool ptt_pressed = !gpio_get_level(PTT_PIN);  // Assuming active low
-    is_transmitting = ptt_pressed;
-    gpio_set_level(LED_PIN, ptt_pressed);  // Local LED
-
-    // Schedule PTT status send
-    static ptt_status_t status;
-    status.ptt_active = ptt_pressed;
-    esp_now_send(peer_mac, (uint8_t*)&status, sizeof(ptt_status_t));
-}
-
-/*
- * ESP-NOW send callback
- */
 static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status) {
-    if (status != ESP_NOW_SEND_SUCCESS) {
-        ESP_LOGW(TAG, "Failed to send ESP-NOW packet");
-    }
+   if (status != ESP_NOW_SEND_SUCCESS) {
+       DEBUG_WARNING_PRINT(TAG, "Failed to send ESP-NOW packet");
+   }
 }
 
-/*
- * ESP-NOW receive callback
- */
 static void esp_now_recv_cb(const esp_now_recv_info_t *esp_now_info,
-                           const uint8_t *data,
-                           int len) {
-    // Check if it's a PTT status message
-    if (len == sizeof(ptt_status_t)) {
-        ptt_status_t *status = (ptt_status_t*)data;
-        gpio_set_level(LED_PIN, status->ptt_active);
-        return;
-    }
+                          const uint8_t *data,
+                          int len) {
+   // Check if it's a PTT status message
+   if (len == sizeof(ptt_status_t)) {
+       ptt_status_t *status = (ptt_status_t*)data;
+       gpio_set_level(LED_PIN, status->ptt_active);
+       return;
+   }
 
-    // Handle audio packet
-    if (len == sizeof(audio_packet_t) && !is_transmitting) {
-        audio_packet_t *packet = (audio_packet_t*)data;
-        size_t bytes_written = 0;
-        
-        // Write directly to I2S
-        esp_err_t ret = i2s_channel_write(tx_handle, packet->samples,
-                                        packet->size,
-                                        &bytes_written,
-                                        0);  // No wait
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to write to DAC: %s", esp_err_to_name(ret));
-        }
-    }
+   // Handle audio packet
+   if (len == sizeof(audio_packet_t) && !is_transmitting) {
+       audio_packet_t *packet = (audio_packet_t*)data;
+       size_t bytes_written = 0;
+       
+       esp_err_t ret = i2s_channel_write(tx_handle, packet->samples,
+                                       packet->size,
+                                       &bytes_written,
+                                       0);  // No wait
+       if (ret != ESP_OK) {
+           DEBUG_WARNING_PRINT(TAG, "Failed to write to DAC: %s", esp_err_to_name(ret));
+       }
+   }
 }
 
-/*
- * Print VU meter data in a formatted way
- */
-static void print_vu_data(const int32_t* buffer,
-                         double dc_offset,
-                         double rms,
-                         double filtered_rms,
-                         double db_value,
-                         int level,
-                         int32_t min_sample,
-                         int32_t max_sample) {
-    // Create visual VU meter bar
-    char bar[21];
-    for (int i = 0; i < 20; i++) {
-        bar[i] = (i < level * 20 / 100) ? '#' : ' ';
-    }
-    bar[20] = '\0';
+static void IRAM_ATTR ptt_isr_handler(void* arg) {
+   bool ptt_pressed = !gpio_get_level(PTT_PIN);
+   is_transmitting = ptt_pressed;
+   gpio_set_level(LED_PIN, ptt_pressed);
 
-    // Determine level description based on dBFS ranges
-    const char* level_desc;
-    if (db_value > -10) level_desc = "very loud";
-    else if (db_value > -20) level_desc = "loud";
-    else if (db_value > -40) level_desc = "conversation";
-    else if (db_value > -60) level_desc = "quiet";
-    else level_desc = "very quiet";
-
-    // Print formatted output with transmission status
-    printf("VU: [%s] %.1f dBFS (%s) | DC: %.1f | RMS: %.1f | %s\n",
-           bar, 
-           db_value,
-           level_desc,
-           dc_offset,
-           filtered_rms,
-           is_transmitting ? "TRANSMITTING" : "LISTENING");
+   static ptt_status_t status;
+   status.ptt_active = ptt_pressed;
+   esp_now_send(peer_mac, (uint8_t*)&status, sizeof(ptt_status_t));
 }
 
-/*
- * Main microphone task
- */
 static void mic_task(void *arg) {
-    // Allocate DMA buffer
-    int32_t *buffer = heap_caps_malloc(DMA_FRAME_NUM * sizeof(int32_t), MALLOC_CAP_DMA);
-    if (buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate buffer");
-        vTaskDelete(NULL);
-        return;
-    }
+   int32_t *buffer = heap_caps_malloc(DMA_FRAME_NUM * sizeof(int32_t), MALLOC_CAP_DMA);
+   if (buffer == NULL) {
+       DEBUG_ERROR_PRINT(TAG, "Failed to allocate buffer");
+       vTaskDelete(NULL);
+       return;
+   }
 
-    // Initialize VU meter state
-    vu_meter_state_t vu_state;
-    vu_meter_init(&vu_state);
-    size_t bytes_read = 0;
-    uint16_t sequence = 0;
-    
-    // Warm-up period
-    ESP_LOGI(TAG, "Starting warm-up...");
-    for (int i = 0; i < 10; i++) {
-        esp_err_t ret = i2s_channel_read(rx_handle, buffer,
-                                       DMA_FRAME_NUM * sizeof(int32_t),
-                                       &bytes_read, portMAX_DELAY);
-        if (ret == ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-    }
-    ESP_LOGI(TAG, "Warm-up complete");
-    
-    // Main processing loop
-    while (1) {
-        esp_err_t ret = i2s_channel_read(rx_handle, buffer,
-                                       DMA_FRAME_NUM * sizeof(int32_t),
-                                       &bytes_read, portMAX_DELAY);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Error reading I2S data: %s", esp_err_to_name(ret));
-            continue;
-        }
+   vu_meter_state_t vu_state;
+   vu_meter_init(&vu_state);
+   size_t bytes_read = 0;
+   uint16_t sequence = 0;
+   
+   // Warm-up period
+   DEBUG_INFO_PRINT(TAG, "Starting warm-up...");
+   for (int i = 0; i < 10; i++) {
+       esp_err_t ret = i2s_channel_read(rx_handle, buffer,
+                                      DMA_FRAME_NUM * sizeof(int32_t),
+                                      &bytes_read, portMAX_DELAY);
+       if (ret == ESP_OK) {
+           vTaskDelay(pdMS_TO_TICKS(10));
+       }
+   }
+   DEBUG_INFO_PRINT(TAG, "Warm-up complete");
+   
+   while (1) {
+       esp_err_t ret = i2s_channel_read(rx_handle, buffer,
+                                      DMA_FRAME_NUM * sizeof(int32_t),
+                                      &bytes_read, portMAX_DELAY);
+       if (ret != ESP_OK) {
+           DEBUG_ERROR_PRINT(TAG, "Error reading I2S data: %s", esp_err_to_name(ret));
+           continue;
+       }
 
-        int samples = bytes_read / sizeof(int32_t);
-        if (samples == 0) continue;
+       int samples = bytes_read / sizeof(int32_t);
+       if (samples == 0) continue;
 
-        // Process samples for VU meter
-        double rms, db_value;
-        int level;
-        vu_meter_process(&vu_state, buffer, samples, &rms, &db_value, &level);
+       // Process samples for VU meter
+       double rms, db_value;
+       int level;
+       vu_meter_process(&vu_state, buffer, samples, &rms, &db_value, &level);
 
-        // Transmit audio if PTT is pressed
-        if (is_transmitting && peer_connected) {
-            // Send audio data in fragments
-            for (int offset = 0; offset < samples; offset += AUDIO_PACKET_SIZE / sizeof(int32_t)) {
-                audio_packet_t packet = {
-                    .sequence = sequence++,
-                    .size = MIN(AUDIO_PACKET_SIZE, (samples - offset) * sizeof(int32_t))
-                };
-                
-                memcpy(packet.samples, &buffer[offset], packet.size);
-                
-                esp_err_t ret = esp_now_send(peer_mac, (uint8_t*)&packet, sizeof(packet));
-                if (ret != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to send ESP-NOW packet: %s", esp_err_to_name(ret));
-                }
-            }
-        }
+       // Transmit audio if PTT is pressed
+       if (is_transmitting && peer_connected) {
+           // Send audio data in fragments
+           for (int offset = 0; offset < samples; offset += AUDIO_PACKET_SIZE / sizeof(int32_t)) {
+               audio_packet_t packet = {
+                   .sequence = sequence++,
+                   .size = MIN(AUDIO_PACKET_SIZE, (samples - offset) * sizeof(int32_t))
+               };
+               
+               memcpy(packet.samples, &buffer[offset], packet.size);
+               
+               esp_err_t ret = esp_now_send(peer_mac, (uint8_t*)&packet, sizeof(packet));
+               if (ret != ESP_OK) {
+                   DEBUG_WARNING_PRINT(TAG, "Failed to send ESP-NOW packet: %s", esp_err_to_name(ret));
+               }
+           }
+       }
 
-        // Display VU meter
-        print_vu_data(buffer,
-                     vu_state.dc_offset,
-                     rms,
-                     vu_state.filtered_rms,
-                     db_value,
-                     level,
-                     vu_state.min_sample,
-                     vu_state.max_sample);
-        
-        vTaskDelay(1);  // Minimal delay but still allow other tasks to run
-    }
+       // Display VU meter
+       print_vu_data(buffer,
+                    vu_state.dc_offset,
+                    rms,
+                    vu_state.filtered_rms,
+                    db_value,
+                    level,
+                    vu_state.min_sample,
+                    vu_state.max_sample);
+   }
 
-    heap_caps_free(buffer);
-    vTaskDelete(NULL);
+   heap_caps_free(buffer);
+   vTaskDelete(NULL);
 }
 
-/*
- * Application entry point
- */
 void app_main(void) {
-    ESP_LOGI(TAG, "Starting ESP32 Intercom...");
+   DEBUG_INFO_PRINT(TAG, "Starting ESP32 Intercom...");
+   print_debug_config();
 
-    // Initialize GPIO for PTT button and LED
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << PTT_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    gpio_config(&io_conf);
-    
-    io_conf.pin_bit_mask = (1ULL << LED_PIN);
-    io_conf.mode = GPIO_MODE_OUTPUT;
-    io_conf.intr_type = GPIO_INTR_DISABLE;
-    gpio_config(&io_conf);
+   // Initialize GPIO for PTT button and LED
+   gpio_config_t io_conf = {
+       .pin_bit_mask = (1ULL << PTT_PIN),
+       .mode = GPIO_MODE_INPUT,
+       .pull_up_en = GPIO_PULLUP_ENABLE,
+       .intr_type = GPIO_INTR_ANYEDGE,
+   };
+   gpio_config(&io_conf);
+   
+   io_conf.pin_bit_mask = (1ULL << LED_PIN);
+   io_conf.mode = GPIO_MODE_OUTPUT;
+   io_conf.intr_type = GPIO_INTR_DISABLE;
+   gpio_config(&io_conf);
 
-    // Install GPIO ISR service and add PTT handler
-    gpio_install_isr_service(0);
-    gpio_isr_handler_add(PTT_PIN, ptt_isr_handler, NULL);
+   // Install GPIO ISR service and add PTT handler
+   gpio_install_isr_service(0);
+   gpio_isr_handler_add(PTT_PIN, ptt_isr_handler, NULL);
 
-    // Initialize ESP-NOW
-    esp_err_t ret = init_espnow();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize ESP-NOW: %s", esp_err_to_name(ret));
-        return;
-    }
-    
-    // Initialize I2S interfaces
-    ESP_ERROR_CHECK(init_i2s_mic());  // Microphone
-    ESP_ERROR_CHECK(init_i2s_dac());  // DAC
+   // Initialize ESP-NOW
+   esp_err_t ret = init_espnow();
+   if (ret != ESP_OK) {
+       DEBUG_ERROR_PRINT(TAG, "Failed to initialize ESP-NOW: %s", esp_err_to_name(ret));
+       return;
+   }
+   
+   // Initialize I2S interfaces
+   ESP_ERROR_CHECK(init_i2s_mic());  // Microphone
+   ESP_ERROR_CHECK(init_i2s_dac());  // DAC
 
-    // Create microphone task
-    BaseType_t task_created = xTaskCreate(mic_task,
-                                        "mic_task",
-                                        4096,
-                                        NULL,
-                                        5,
-                                        NULL);
-                                        
-    if (task_created != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create mic task");
-        // Cleanup
-        i2s_channel_disable(rx_handle);
-        i2s_del_channel(rx_handle);
-        i2s_channel_disable(tx_handle);
-        i2s_del_channel(tx_handle);
-        return;
-    }
+   // Create microphone task
+   BaseType_t task_created = xTaskCreate(mic_task,
+                                       "mic_task",
+                                       4096,
+                                       NULL,
+                                       20,      //20 is high priority 
+                                       NULL);
+                                       
+   if (task_created != pdPASS) {
+       DEBUG_ERROR_PRINT(TAG, "Failed to create mic task");
+       // Cleanup
+       i2s_channel_disable(rx_handle);
+       i2s_del_channel(rx_handle);
+       i2s_channel_disable(tx_handle);
+       i2s_del_channel(tx_handle);
+       return;
+   }
 
-    ESP_LOGI(TAG, "Intercom initialized successfully");
+   DEBUG_INFO_PRINT(TAG, "Intercom initialized successfully");
 }
