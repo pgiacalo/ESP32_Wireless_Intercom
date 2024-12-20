@@ -3,6 +3,29 @@
  * With configurable debug output
  *
  * NOTE: Debug controls are located in intercom/main/include/debu_config.h
+
+There are significant inherent limitations when using ESP32 for real-time wireless audio. From what I've seen in various forums and projects:
+
+ESP-NOW, while fast for data transmission, isn't really designed for continuous real-time streaming. It operates over WiFi and inherits WiFi's periodic management tasks that can interrupt transmission.
+Most successful ESP32 audio projects tend to:
+
+Use buffering and accept higher latency
+Stream compressed audio rather than raw samples
+Use it for non-real-time applications like streaming stored music
+Or use it for lower-quality voice communication where some dropout is acceptable
+
+
+For real-time audio transmission, developers often turn to:
+
+Dedicated RF solutions (like Nordic's nRF52)
+Custom RF protocols
+Bluetooth A2DP (though this has higher latency)
+Or specialized wireless audio chips
+
+
+
+Our experiments align with this general consensus - while the ESP32 is a great general-purpose IoT device, it has fundamental limitations for real-time wireless audio transmission, particularly when trying to achieve low latency with good quality.
+
  */
 
 #include <stdio.h>
@@ -20,6 +43,7 @@
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "debug_config.h"
+#include "optimize.h"
 
 //-----------------------------------------------------------------------------
 // Configuration Constants
@@ -29,11 +53,11 @@
 #define SAMPLE_RATE         16000    // Sample rate in Hz
 #define SAMPLE_BITS         32       // Sample bits
 #define I2S_CH             I2S_SLOT_MODE_MONO  // Mono mode
-#define DMA_DESC_NUM       4         // Number of DMA descriptors
-#define DMA_FRAME_NUM      960       // Frames per DMA buffer
+#define DMA_DESC_NUM       8         // Changed from 4 to 8
+#define DMA_FRAME_NUM      480       // Changed from 960 to 480
 
 // ESP-NOW packet size
-#define AUDIO_PACKET_SIZE  120       // Audio packet size
+#define AUDIO_PACKET_SIZE  240       // Changed from 120 to 240
 
 // GPIO Pin Configuration - Microphone
 #define I2S_MIC_BCK_IO     26       // Bit clock pin
@@ -118,7 +142,7 @@ static void vu_meter_process(vu_meter_state_t *state,
 static esp_err_t init_i2s_mic(void);
 static esp_err_t init_i2s_dac(void);
 static esp_err_t init_espnow(void);
-static void IRAM_ATTR ptt_isr_handler(void* arg);
+static void ptt_isr_handler(void* arg);
 static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t status);
 static void esp_now_recv_cb(const esp_now_recv_info_t *esp_now_info,
                            const uint8_t *data,
@@ -379,6 +403,23 @@ static esp_err_t init_espnow(void) {
    ret = esp_wifi_set_mode(WIFI_MODE_STA);
    if (ret != ESP_OK) return ret;
 
+   // Set WiFi protocol mode
+   ret = esp_wifi_set_protocol(WIFI_IF_STA, 
+                              WIFI_PROTOCOL_11B | 
+                              WIFI_PROTOCOL_11G | 
+                              WIFI_PROTOCOL_11N);
+   if (ret != ESP_OK) return ret;
+
+   // Configure WiFi settings
+   wifi_config_t wifi_config = {
+       .sta = {
+           .channel = WIFI_CHANNEL,
+           .listen_interval = 1,
+       },
+   };
+   ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+   if (ret != ESP_OK) return ret;
+
    ret = esp_wifi_start();
    if (ret != ESP_OK) return ret;
 
@@ -570,6 +611,9 @@ void app_main(void) {
        return;
    }
    
+   // Call optimization after ESP-NOW is initialized but before I2S
+   optimizeESP32ForAudio();
+   
    // Initialize I2S interfaces
    ESP_ERROR_CHECK(init_i2s_mic());  // Microphone
    ESP_ERROR_CHECK(init_i2s_dac());  // DAC
@@ -579,7 +623,7 @@ void app_main(void) {
                                        "mic_task",
                                        4096,
                                        NULL,
-                                       20,      //20 is high priority 
+                                       configMAX_PRIORITIES - 1,  // Changed from 20 to max priority
                                        NULL);
                                        
    if (task_created != pdPASS) {

@@ -1,2 +1,2 @@
-idf_component_register(SRCS "intercom.c"
-                      INCLUDE_DIRS "include")                    
+idf_component_register(SRCS "intercom.c" "optimize.c"
+                      INCLUDE_DIRS "include")
