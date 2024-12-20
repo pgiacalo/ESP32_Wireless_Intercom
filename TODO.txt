@@ -1,0 +1,33 @@
+1) Replace the I2S microphone (INMP441) and the DAC (MAX98357A) with a single board that supports mic input and amplified audio output
+
+Solution: Claude suggests using the WM8960 ($15 on Aliexpress)
+
+	https://www.aliexpress.us/item/3256806131329439.html?spm=a2g0o.productlist.main.9.5a464d0250mttu&algo_pvid=91803ca4-7574-46f0-b389-fbc8f6938ca9&algo_exp_id=91803ca4-7574-46f0-b389-fbc8f6938ca9-4&pdp_npi=4%40dis%21USD%219.89%219.89%21%21%2171.96%2171.96%21%402101c59817346560670843686e5ec3%2112000036738388285%21sea%21US%21911469752%21X&curPageLogUid=R7G1qzgHUR4X&utparam-url=scene%3Asearch%7Cquery_from%3A
+
+Here are the priority features and configurations for the WM8960 that we'll implement when the hardware arrives:
+
+1. Noise Reduction Priority Features:
+- ALC configuration with fast attack for dynamic road noise
+- High-pass filter settings optimized for wind noise (150-200Hz)
+- Voice-frequency EQ enhancement (300Hz-3kHz boost)
+- Optimized mic gain settings
+- Maximum headphone volume adjustment
+
+2. Configuration Sequence:
+- Initial power-up and reset sequence
+- I2C initialization
+- Clock configuration for your sample rate
+- ALC and filter enabling
+- EQ setup for voice optimization
+- Input/output gain staging
+
+3. Additional Testing Points:
+- Test different ALC attack/decay times
+- Find optimal high-pass filter frequency
+- Determine best mic gain vs noise trade-off
+- Test various EQ curves for voice clarity
+
+When you receive the boards, we can start with a basic implementation and then fine-tune these parameters based on real-world testing in your convertible.
+
+Would you like me to keep track of anything else for the future implementation?
+
