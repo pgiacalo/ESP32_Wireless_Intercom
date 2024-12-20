@@ -8,6 +8,13 @@
 #include "driver/temperature_sensor.h"
 #include "esp_sleep.h"
 
+// There is no difference in ESP32 power consumption with WIFI_TX_POWER set to 8 vs 84. 
+// In both cases, 0.81 watts are consumed while transmitting and 0.41 when not transmitting.
+#define WIFI_TX_POWER      84    // Range: 8 (min) to 84 (max), default 84
+                                // 8  = Quarter power, ~50m range, lowest power consumption
+                                // 34 = Half power, ~100m range, medium power consumption
+                                // 84 = Full power, ~200m+ range, highest power consumption
+
 void optimizeESP32ForAudio() {
     esp_err_t ret;
 
@@ -24,11 +31,17 @@ void optimizeESP32ForAudio() {
         ESP_LOGE("OPTIMIZE", "Failed to disable WiFi power save");
     }
 
-    // Set WiFi inactive time (for station interface)
-    ret = esp_wifi_set_inactive_time(WIFI_IF_STA, 0);
+    // Set configurable TX power level
+    ret = esp_wifi_set_max_tx_power(WIFI_TX_POWER);
     if (ret != ESP_OK) {
-        ESP_LOGE("OPTIMIZE", "Failed to set WiFi inactive time");
+        ESP_LOGE("OPTIMIZE", "Failed to set TX power");
     }
+    
+    // Set WiFi inactive time (for station interface)
+    // ret = esp_wifi_set_inactive_time(WIFI_IF_STA, 0);
+    // if (ret != ESP_OK) {
+    //     ESP_LOGE("OPTIMIZE", "Failed to set WiFi inactive time"); //removed: causes error at startup
+    // }
     
     // 2. Disable logging completely
     esp_log_level_set("*", ESP_LOG_NONE);
