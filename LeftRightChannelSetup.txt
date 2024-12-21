@@ -1,0 +1,50 @@
+Here are my notes on how to configure the ESP32 intercom.c software 
+and I2S audio hardware, in order to achieve either left or right 
+channel audio output. 
+   - achieving 2-channel output is easiest with a Y-Connector at the output
+
+1) First, here are the two hardware devices I am using for the microphone and the DAC. 
+
+I2S Microphone (INMP441):
+   SCK (Serial Clock) → GPIO 26
+   WS (Word Select/Left Right Clock) → GPIO 25
+   SD (Serial Data) → GPIO 23
+   L/R → GND (for left channel) or 3.3V (for right channel)
+   VDD → 3.3V
+   GND → GND
+
+
+I2S DAC/AMPLIFIER (PCM5102A):
+   Let me map each pin of the PCM5102A to the ESP32 and explain all connections:
+   SCK → Not connected (master clock input)
+   BCK → ESP32 GPIO 26 (bit clock)
+   DIN → ESP32 GPIO 22 (data)
+   LCK → ESP32 GPIO 25 (word select/LRCK)
+   GND → ESP32 GND
+   VIN → ESP32 3.3V
+
+
+2) Second, here are the setup requirements for either left or right channel audio output:
+
+LEFT CHANNEL AUDIO:
+   1. INMP441 Microphone
+      - Hardware: L/R SELECT pin to GND
+      - Software: .slot_mask = I2S_STD_SLOT_LEFT in function init_i2s_mic()
+
+   2. PCM5102A DAC
+      - Hardware: FMT pin floating
+      - Software: .slot_mask = I2S_STD_SLOT_LEFT in function init_i2s_dac()
+
+RIGHT CHANNEL AUDIO:
+   1. INMP441 Microphone
+      - Hardware: L/R SELECT pin to VCC (3.3V)
+      - Software: .slot_mask = I2S_STD_SLOT_RIGHT in function init_i2s_mic()
+
+   2. PCM5102A DAC
+      - Hardware: FMT pin floating
+      - Software: .slot_mask = I2S_STD_SLOT_RIGHT in function init_i2s_dac()
+
+Important Notes:
+- Both devices must use the same channel configuration
+- Never connect PCM5102A's FMT pin to VCC
+- The I2S configuration for both devices must match the microphone's hardware setting

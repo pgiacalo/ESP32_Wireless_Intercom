@@ -23,7 +23,46 @@
  * 
  * These changes significantly reduced the previous 70ms dropouts that occurred every 700ms
  * by better balancing latency, buffering, and processing priorities.
+ *
  */
+
+/*-----------------------------------------------------------------------------
+ESP32 I2S Device Pin Mappings
+
+1. INMP441 Microphone (Input Device)
+----------------------
+ESP32          INMP441
+GPIO26   -->   SCK     (Bit Clock)
+GPIO25   -->   WS      (Word Select/LR Clock)
+GPIO22   <--   SD      (Serial Data)
+3.3V     -->   VDD     (Power)
+GND      -->   GND     (Ground)
+GND/3.3V -->   L/R     (GND=Left, 3.3V=Right Channel Select)
+
+2. PCM5102A DAC (Output Device)
+-------------------
+ESP32          PCM5102A
+GPIO27   -->   BCK     (Bit Clock)
+GPIO14   -->   LRCK    (Word Select)
+GPIO12   -->   DIN     (Serial Data)
+GND      -->   GND     (Ground)
+3.3V     -->   VIN     (Power)
+FLOAT    -->   FMT     (Channel Select - leave floating)
+GND      -->   SCK     (System Clock)
+GND      -->   XMT     (Mute)
+3.3V     -->   3.3V    (Power)
+
+3. MAX98357A DAC/Amplifier (Output Device)
+------------------------------
+ESP32          MAX98357A
+GPIO27   -->   BCLK    (Bit Clock)
+GPIO14   -->   LRC     (Word Select)
+GPIO12   -->   DIN     (Serial Data)
+GND      -->   GND     (Ground)
+3.3V     -->   VDD     (Power)
+GND      -->   GAIN    (Sets gain to 15dB)
+3.3V     -->   SD      (Shutdown - active low)
+-----------------------------------------------------------------------------*/
 
 #include <stdio.h>
 #include <math.h>
@@ -311,7 +350,7 @@ static esp_err_t init_i2s_mic(void) {
             .data_bit_width = SAMPLE_BITS,
             .slot_bit_width = SAMPLE_BITS,
             .slot_mode = I2S_CH,
-            .slot_mask = I2S_STD_SLOT_LEFT,
+            .slot_mask = I2S_STD_SLOT_LEFT, //valid choices: I2S_STD_SLOT_LEFT, I2S_STD_SLOT_RIGHT, I2S_STD_SLOT_BOTH
             .ws_width = SAMPLE_BITS,
             .ws_pol = false,
             .bit_shift = true
@@ -370,7 +409,7 @@ static esp_err_t init_i2s_dac(void) {
             .data_bit_width = SAMPLE_BITS,
             .slot_bit_width = SAMPLE_BITS,
             .slot_mode = I2S_CH,
-            .slot_mask = I2S_STD_SLOT_LEFT,
+            .slot_mask = I2S_STD_SLOT_LEFT, //valid choices: I2S_STD_SLOT_LEFT, I2S_STD_SLOT_RIGHT, I2S_STD_SLOT_BOTH
             .ws_width = SAMPLE_BITS,
             .ws_pol = false,
             .bit_shift = true
